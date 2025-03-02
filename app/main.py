@@ -8,10 +8,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncEngine
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field, ConfigDict
-import uvicorn
 
 from app.exception import ErrorCode, MyCustomException
-from app.middleware.json_logger import JsonRequestLoggerMiddleware
+from app.middleware.json_request_logger import JsonRequestLoggerMiddleware
 from app.exception.handler import my_exception_handler, general_exception_handler, http_exception_handler
 
 
@@ -58,7 +57,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     yield
     
-app = FastAPI(title="FastAPI Logging Example Application", lifespan=lifespan,version="0.2.0")
+app = FastAPI(title="FastAPI Logging Example Application", lifespan=lifespan,version="0.2.2")
 app.add_middleware(JsonRequestLoggerMiddleware)
 app.add_exception_handler(MyCustomException, my_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
@@ -99,12 +98,6 @@ async def get_item(
         raise MyCustomException(ErrorCode.ENTITY_NOT_FOUND, reason="item을 찾을 수 없습니다")
     return ItemSchema.model_validate(item)
 
-############
-## force 
-###########
-# if __name__ == '__main__':
-#     uvicorn.run(
-#         JsonRequestLoggerMiddleware(app=app),
-#         host='0.0.0.0',
-#         port=8000
-#     )
+@app.post("/exception")
+async def raise_some_exception():
+    raise Exception("just test")

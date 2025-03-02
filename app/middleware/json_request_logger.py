@@ -9,11 +9,29 @@ class JsonRequestLoggerMiddleware:
     def __init__(
         self, app: ASGIApp,
         error_info_name: str = "error_info",
-        error_info_mapping: dict[str, str] | None = None,  # error info data
+        error_info_mapping: dict[str, str] | None = None,
         event_id_header: str | None = None,
         client_ip_headers: list[str] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        """
+        Initializes the JSON Request Logger Middleware.
+
+        Args:
+            app (ASGIApp): The ASGI application instance to wrap.
+            error_info_name (str, optional): The key name in the request state from which to extract error information.
+                Defaults to "error_info".
+            error_info_mapping (dict[str, str] | None, optional): A dictionary mapping error information keys (from the request
+                state) to desired log field names. For example, {"code": "error_code", "message": "error_message"}.
+                Defaults to None.
+            event_id_header (str | None, optional): The HTTP header name to extract an event ID from. If not provided or if the header
+                is missing, a new UUID will be generated. Defaults to None.
+            client_ip_headers (list[str] | None, optional): A list of HTTP header names to check for the client IP address,
+                in order of priority. If none are provided, the client IP will be obtained from the scope's "client" value.
+                Defaults to None.
+            logger (logging.Logger | None, optional): A custom logger to use for logging requests. If not provided, a default
+                logger with INFO level is created. Defaults to None.
+        """
         self.app = app
         self.error_info_name = error_info_name
         self.error_info_mapping = error_info_mapping or {
