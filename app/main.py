@@ -2,20 +2,32 @@ from typing import Annotated, Optional
 from uuid import UUID, uuid4
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Path, status, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import HTTPException
 from sqlalchemy import Text, UUID as UUID_sqlalchemy
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncEngine
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field, ConfigDict
+import uvicorn
 
-from app.database import get_db, get_engine
 from app.exception import ErrorCode, MyCustomException
-from app.util.env import get_bool_from_env
-from app.logger.logger_setup import setup_request_logger, disable_uvicorn_logs
 from app.middleware.json_logger import JsonRequestLoggerMiddleware
-from app.exception.handler import my_exception_handler, general_exception_handler
+from app.exception.handler import my_exception_handler, general_exception_handler, http_exception_handler
 
+
+###############
+# db setting ##
+###############
+DATABASE_URL = "sqlite+aiosqlite://"
+engine: AsyncEngine = create_async_engine(DATABASE_URL, echo=False, connect_args={"check_same_thread": False})
+async_session = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+async def get_db():
+    async with async_session() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+            
 class Base(DeclarativeBase):
     pass
 
@@ -35,36 +47,27 @@ class ItemSchema(BaseModel):
     name: str = Field(...)
     description: Optional[str] = Field(default=None)
     sensitive_data: str = Field(...)
-    
 
+
+################
+# app setting ##
+################
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with get_engine().begin() as conn:
+    async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
     
-app = FastAPI(title="FastAPI Logging Example Application", lifespan=lifespan,version="0.0.1")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-if get_bool_from_env("IS_JSON_LOGGING", True):
-    setup_request_logger()      # request-logger를 JSON 포맷으로 설정
-    disable_uvicorn_logs()      # uvicorn.access 로그 비활성화
-    app.add_middleware(JsonRequestLoggerMiddleware)
-else:
-    # Uvicorn의 기본 로그 사용
-    pass
-
-    
+app = FastAPI(title="FastAPI Logging Example Application", lifespan=lifespan,version="0.2.0")
+app.add_middleware(JsonRequestLoggerMiddleware)
 app.add_exception_handler(MyCustomException, my_exception_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
+
+###################
+# path operation ##
+###################
 @app.post("/items", status_code=status.HTTP_200_OK, response_model=ItemSchema)
 async def create_item(
     item_schema: ItemSchema,
@@ -95,3 +98,13 @@ async def get_item(
     if not item:
         raise MyCustomException(ErrorCode.ENTITY_NOT_FOUND, reason="item을 찾을 수 없습니다")
     return ItemSchema.model_validate(item)
+
+############
+## force 
+###########
+# if __name__ == '__main__':
+#     uvicorn.run(
+#         JsonRequestLoggerMiddleware(app=app),
+#         host='0.0.0.0',
+#         port=8000
+#     )

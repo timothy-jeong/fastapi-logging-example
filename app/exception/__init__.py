@@ -1,7 +1,8 @@
 from enum import Enum
-from typing import Optional, Dict
+from typing import Dict
 
 from fastapi import status
+from fastapi.exceptions import HTTPException
 
 
 class ErrorCode(Enum):
@@ -18,13 +19,20 @@ class ErrorCode(Enum):
 class MyCustomException(Exception):
     def __init__(
             self,
-            error_code: ErrorCode,
-            reason: Optional[str] = None,
+            error_code: ErrorCode | None = None,
+            http_exception: HTTPException | None = None,
+            reason: str | None = None
     ):
-        self.http_status = error_code.http_status
-        self.code = error_code.code
-        self.reason = reason if reason else error_code.reason
-        super().__init__(self.reason)
+        if http_exception:
+            self.http_status = http_exception.status_code
+            self.code = "HTTP"
+            self.reason = reason if reason else http_exception.detail    
+            super().__init__(http_exception.detail)
+        else:            
+            self.http_status = error_code.http_status
+            self.code = error_code.code
+            self.reason = reason if reason else error_code.reason
+            super().__init__(self.reason)
 
     def to_error_response(self) -> Dict:
         return {"code": self.code, "message": self.reason}

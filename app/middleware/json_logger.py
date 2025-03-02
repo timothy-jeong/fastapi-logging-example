@@ -1,79 +1,113 @@
 import logging
-import traceback
 import time
 import uuid
 import json
 
-from fastapi import FastAPI, Request
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Message, Scope, Receive, Send
 
-from app.logger.logger_setup import REQUEST_LOGGER_NAME
-from app.exception import ErrorCode, MyCustomException
-from app.util.env import get_bool_from_env
+class JsonRequestLoggerMiddleware:
+    def __init__(
+        self, app: ASGIApp,
+        error_info_name: str = "error_info",
+        error_info_mapping: dict[str, str] | None = None,  # error info data
+        event_id_header: str | None = None,
+        client_ip_headers: list[str] | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self.app = app
+        self.error_info_name = error_info_name
+        self.error_info_mapping = error_info_mapping or {
+            "code": "error_code",
+            "message": "error_message",
+            "stack_trace": "stack_trace",
+        }
+        self.event_id_header = event_id_header
+        self.client_ip_headers = client_ip_headers or ["x-forwarded-for", "x-real-ip"]
+        # logger setting
+        if logger:
+            self.logger = logger
+        else:
+            logger = logging.getLogger("request-logger")
+            logger.setLevel(logging.INFO)
+            if logger.hasHandlers():
+                logger.handlers.clear()
+            stream_handler = logging.StreamHandler()
+            stream_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter("%(message)s")  
+            stream_handler.setFormatter(formatter)
+            logger.addHandler(stream_handler)
+            logger.propagate = False
+            self.logger = logger
+            
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
 
-logger = logging.getLogger(REQUEST_LOGGER_NAME)
-
-STACKTRACE_LOGGING_ENABLED = get_bool_from_env("IS_STACKTRACE_LOGGING", True)
-
-
-class JsonRequestLoggerMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: FastAPI):
-        super().__init__(app)
-    async def dispatch(self, request: Request, call_next):
         start_time = time.time()
-        event_id = str(uuid.uuid4())
-
+        
+        # parse header
+        headers = {k.decode("latin1"): v.decode("latin1") for k, v in scope.get("headers", [])}
+        # event_id
+        if self.event_id_header and self.event_id_header in headers:
+            event_id = headers[self.event_id_header]
+        else:
+            event_id = str(uuid.uuid4())
+            
+        # extract client ip from client_ip_headers
+        client_ip = None
+        for header in self.client_ip_headers:
+            if header in headers:
+                # X-Forwarded-For case
+                client_ip = headers[header].split(",")[0].strip()
+                break
+        if not client_ip:
+            client_ip = scope.get("client", ("unknown",))[0]
+                        
+        # default log data
         log_data = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
             "event_id": event_id,
-            "method": request.method,
-            "path": request.url.path,
-            "client_ip": request.client.host if request.client else "unknown",
-            "user_agent": request.headers.get("user-agent"),
+            "method": scope.get("method"),
+            "path": scope.get("path"),
+            "client_ip": client_ip,
+            "user_agent": headers.get("user-agent"),
         }
 
-        try:
-            response = await call_next(request)
-            status_code = response.status_code
-            log_type = "access"
+        response_status_code = None
 
-        except Exception as e: 
-            status_code = 500 
-            log_type = "error"
-            log_data['error_code'] = "UNEXPECTED_ERROR" # Or some default code
-            log_data['exception'] = type(e).__name__
-            log_data['error_message'] = str(e) # Log the exception message as fallback
-            log_data['stack_trace'] = traceback.format_exc().splitlines()
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_status_code
+            if message["type"] == "http.response.start":
+                response_status_code = message.get("status")
+            await send(message)
 
-            application_exception = MyCustomException(ErrorCode.UNEXPECTED)
-            response = application_exception.to_error_response()
-
-
-        error_info = getattr(request.state, "error_info", None)  # Use getattr
-
-        if error_info:  # exception handler 에서 넘기는 error_info 정보 확인
-
-            status_code = error_info.get("http_status", getattr(ErrorCode.UNEXPECTED, "http_status", 500)) # Use status code from error_info, Default 500
-            log_type = "error" if status_code >= 400 and status_code not in [401, 403] else 'security'
-
-            log_data.update({  # error_info 를 log data 에 추가
-                "error_code": error_info.get("code"),
-                "error_message": error_info.get("message"),
-                "stack_trace": error_info.get("stack_trace") if (STACKTRACE_LOGGING_ENABLED or error_info.get("code") == ErrorCode.UNEXPECTED.code) else None,
-            })
-
-
-        log_level = "ERROR" if status_code >= 400 else "INFO"
-
-        log_data['time_taken_ms'] = int((time.time() - start_time) * 1000)
-        log_data['log_type'] = log_type
-        log_data['level'] = log_level
-        log_data['status_code'] = status_code
-        log_data['db_query_time_ms'] = getattr(request.state, "db_query_time_ms", None)
-
-        # https://docs.python.org/3/library/logging.html#logging.getLevelName 의 Changed in version 3.4 에 따르면
-        # logging.getLevelName(str) 은 유지되긴 하지만 실수였다고 한다. 이를 최대한 사용하지 않기 위해 이런 방법을 이용헀다.
-        log_level_int: int = logging.getLevelNamesMapping()[log_level] 
-        logger.log(log_level_int,json.dumps(log_data, ensure_ascii=False).encode('utf-8'))
-
-        return response
+        await self.app(scope, receive, send_wrapper)
+        
+        time_taken_ms = int((time.time() - start_time) * 1000)
+        
+        # based on response status_code
+        if response_status_code is None:
+            response_status_code = 500
+        log_type = "access" if response_status_code < 400 else "error"
+        log_level = "ERROR" if response_status_code >= 400 else "INFO"
+                
+        # error log data
+        
+        error_info = scope.get("state", {}).get(self.error_info_name, None)
+        if not error_info:
+            log_data.update({"error": None})
+        if error_info:
+            log_data.update({"error": {}})
+            for src_key, dest_key in self.error_info_mapping.items():
+                log_data["error"][dest_key] = error_info.get(src_key)            
+        
+        # log data update
+        log_data.update({
+            "time_taken_ms": time_taken_ms,
+            "status_code": response_status_code,
+            "log_type": log_type,
+            "level": log_level,
+        })     
+        
+        log_level_int = logging.getLevelNamesMapping()[log_level]
+        self.logger.log(log_level_int, json.dumps(log_data, ensure_ascii=False))
